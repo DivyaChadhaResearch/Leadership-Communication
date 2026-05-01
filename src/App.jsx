@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 
 // ─── Anthropic API helper (via Vercel serverless proxy) ────────────────────
-async function callClaude(systemPrompt, userMessage) {
+async function callAI(systemPrompt, userMessage) {
   let response;
   try {
     response = await fetch('/api/evaluate', {
@@ -63,86 +63,102 @@ function speakText(text, onStart, onEnd, voiceRef) {
 
 // ─── AI SYSTEM PROMPTS ──────────────────────────────────────────────────────
 const SYSTEM_PROMPTS = {
-  challenge: `You are a world-class executive communication coach specialising in C-suite and boardroom-level leadership.
-A national sales leader has spoken in response to a leadership scenario. Your job:
-1. Analyse their speech for: authority, strategic framing, clarity, grammar, and executive vocabulary.
-2. Provide a score (X/10) for each dimension.
-3. Rewrite their statement as a flawless, high-impact executive response at VP/C-suite level.
-4. Give 2-3 specific, actionable coaching tips.
+  challenge: `You are a world-class C-suite executive communication coach with 20+ years training Fortune 500 leaders.
+A national sales leader has responded to a high-stakes leadership scenario. Analyse and coach them.
 
-Format your response EXACTLY as:
+YOUR OUTPUT MUST FOLLOW THIS EXACT FORMAT — use these exact section headers:
+
 SCORES:
-Authority: X/10
-Strategic Framing: X/10
-Clarity: X/10
-Grammar: X/10
-Executive Vocabulary: X/10
+Authority: [number]/10
+Strategic Framing: [number]/10
+Clarity: [number]/10
+Grammar: [number]/10
+Executive Vocabulary: [number]/10
 
 EXECUTIVE REWRITE:
-[The corrected, polished, leadership-level version of their statement — ready to be spoken aloud]
+[Write a single polished paragraph — the perfect C-suite version of what they said. No bullet points. Write it as a complete, ready-to-speak executive statement with gravitas, precision, and strategic framing. This is what will be read aloud to them.]
 
 COACHING TIPS:
-• [Tip 1]
-• [Tip 2]
-• [Tip 3]`,
+• [Specific tip on what to improve — e.g. vocal authority, opening structure]
+• [Specific tip on language or vocabulary to elevate]
+• [Specific tip on strategic framing or executive presence]`,
 
-  grammar: `You are a senior executive speech coach. A high-level sales leader has spoken a statement. Your job:
-1. Identify grammar errors, filler words, weak phrasing, and non-executive language.
-2. Assign an overall Executive Communication Score (X/10).
-3. Rewrite their statement as a powerful, grammatically perfect, C-suite-level communication.
-4. Explain 2-3 key improvements made.
+  grammar: `You are a senior executive speech coach specialising in C-suite communication refinement.
+A national sales leader has spoken a statement. Your job is to correct and elevate it to boardroom-ready communication.
 
-Format EXACTLY as:
-EXECUTIVE COMMUNICATION SCORE: X/10
+YOUR OUTPUT MUST FOLLOW THIS EXACT FORMAT:
+
+EXECUTIVE COMMUNICATION SCORE: [number]/10
 
 ORIGINAL ISSUES IDENTIFIED:
-• [Issue 1]
-• [Issue 2]
-• [Issue 3]
+• [Grammar error, filler word, or weak phrase found]
+• [Second issue]
+• [Third issue]
 
 EXECUTIVE REWRITE:
-[The corrected, leadership-level version — polished and ready to deliver]
+[A single polished paragraph — the perfect executive version. No bullet points. Complete, confident, grammatically flawless, ready to be spoken aloud at C-suite level. Use strong, precise leadership language.]
 
 IMPROVEMENTS MADE:
-• [What changed and why — 2-3 points]`,
+• [Key improvement 1 and why it matters]
+• [Key improvement 2 and why it matters]`,
 
-  slide: `You are an executive presentation coach for Fortune 500 leaders. A national sales leader has described the context for a slide or presentation. Your job:
-1. Transform their spoken description into a powerful, board-ready narrative statement.
-2. Assess their communication clarity and executive presence (score X/10).
-3. Provide the ideal opening line for this slide/section that a CEO would deliver.
-4. Give delivery instructions (pace, emphasis, pause points).
+  slide: `You are an executive presentation strategist who coaches CEOs and board-level leaders.
+A national sales leader has described their slide or presentation context. Transform it into board-ready communication.
 
-Format EXACTLY as:
-PRESENTATION CLARITY SCORE: X/10
+YOUR OUTPUT MUST FOLLOW THIS EXACT FORMAT:
+
+PRESENTATION CLARITY SCORE: [number]/10
 
 BOARD-READY NARRATIVE:
-[The polished, executive-level narrative for the slide — 2-3 sentences maximum]
+[2-3 sentences maximum — the polished, executive-level narrative for this slide. Precise, impactful, jargon-free. This will be spoken aloud.]
 
 IDEAL OPENING LINE:
-[One powerful opening sentence a CEO would use to open this section]
+[One single powerful sentence that a CEO would use to command the room at this moment. Make it memorable.]
 
 DELIVERY INSTRUCTIONS:
-• [Pace/tone guidance]
-• [Where to pause for emphasis]
-• [Body language or vocal tip]`,
+• [Pace and tone — e.g. slow down here, drop your voice, pause after this word]
+• [Where to pause for maximum impact]
+• [Body language or vocal presence tip]`,
 };
 
-// ─── Parse AI response — extract TTS text ──────────────────────────────────
+// ─── Parse AI response — extract the rewritten executive text for TTS ────────
 function parseAIResponse(text) {
-  if (!text) return { ttsText: '' };
-  // Try each rewrite section in priority order
-  const patterns = [
-    /EXECUTIVE REWRITE:\s*([\s\S]*?)(?=\nCOACHING TIPS:|\nIMPROVEMENTS|$)/i,
-    /BOARD-READY NARRATIVE:\s*([\s\S]*?)(?=\nIDEAL OPENING LINE:|$)/i,
-    /IDEAL OPENING LINE:\s*([\s\S]*?)(?=\nDELIVERY INSTRUCTIONS:|$)/i,
+  if (!text || !text.trim()) return { ttsText: '' };
+
+  // Priority 1: EXECUTIVE REWRITE section
+  const rewrites = [
+    /EXECUTIVE REWRITE:\s*\n([\s\S]*?)(?=\n\s*(?:COACHING TIPS|IMPROVEMENTS MADE|DELIVERY|$))/i,
+    /EXECUTIVE REWRITE:\s*([^\n][\s\S]*?)(?=\n[A-Z]{3,}[^a-z]|$)/i,
   ];
-  for (const pat of patterns) {
+  for (const pat of rewrites) {
     const m = text.match(pat);
-    if (m && m[1].trim()) return { ttsText: m[1].trim() };
+    if (m && m[1] && m[1].trim().length > 20) {
+      return { ttsText: m[1].trim() };
+    }
   }
-  // Fallback: strip section headers and use first 500 chars of plain content
-  const stripped = text.replace(/^[A-Z ]+:\s*$/gm, '').replace(/•\s*/g, '').trim();
-  return { ttsText: stripped.slice(0, 500) };
+
+  // Priority 2: BOARD-READY NARRATIVE
+  const narrative = text.match(/BOARD-READY NARRATIVE:\s*\n([\s\S]*?)(?=\n\s*(?:IDEAL OPENING|DELIVERY|$))/i)
+    || text.match(/BOARD-READY NARRATIVE:\s*([^\n][\s\S]*?)(?=\n[A-Z]{3,}[^a-z]|$)/i);
+  if (narrative && narrative[1] && narrative[1].trim().length > 20) {
+    return { ttsText: narrative[1].trim() };
+  }
+
+  // Priority 3: IDEAL OPENING LINE
+  const opening = text.match(/IDEAL OPENING LINE:\s*\n?([^\n]+(?:\n[^\n]+)?)/i);
+  if (opening && opening[1] && opening[1].trim().length > 10) {
+    return { ttsText: opening[1].trim() };
+  }
+
+  // Fallback: strip all section headers and bullet markers, return first clean paragraph
+  const cleaned = text
+    .replace(/^[A-Z][A-Z ]+:.*$/gm, '')     // remove ALL-CAPS headers
+    .replace(/^•\s*/gm, '')                  // remove bullets
+    .replace(/^\[\d+\.\d+\/10\]/gm, '')   // remove score labels
+    .replace(/\n{3,}/g, '\n\n')              // collapse whitespace
+    .trim();
+  const firstPara = cleaned.split('\n\n').find(p => p.trim().length > 30) || cleaned;
+  return { ttsText: firstPara.trim().slice(0, 600) };
 }
 
 // ─── Extract dimension scores from AI text ─────────────────────────────────
@@ -494,7 +510,7 @@ const App = () => {
         ? 'Scenario: "' + (selectedChallenge?.title || '') + '"\nGoal: "' + (selectedChallenge?.goal || '') + '"\nLeader response: "' + spokenText + '"'
         : 'Leader statement to evaluate: "' + spokenText + '"'
       console.log('Sending to AI — type:', type, 'length:', spokenText.length);
-      const raw = await callClaude(SYSTEM_PROMPTS[type], userMsg);
+      const raw = await callAI(SYSTEM_PROMPTS[type], userMsg);
       console.log('AI raw response (first 200):', raw.slice(0, 200));
       const { ttsText } = parseAIResponse(raw);
       const scores = extractScores(raw);
