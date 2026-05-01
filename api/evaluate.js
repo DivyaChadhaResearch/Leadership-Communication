@@ -1,19 +1,20 @@
 export default async function handler(req, res) {
-  // ── CORS ────────────────────────────────────────────────────────────────
+  // ── CORS ─────────────────────────────────────────────────────────────────
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  // ── API KEY — reads ANTHROPIC_API_KEY from Vercel env vars ───────────────
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  // ── API KEY ───────────────────────────────────────────────────────────────
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.error('ANTHROPIC_API_KEY is not set');
-    return res.status(500).json({ error: 'Server config error: ANTHROPIC_API_KEY not set in Vercel environment variables' });
+    return res.status(500).json({
+      error: 'GEMINI_API_KEY not set in Vercel Environment Variables'
+    });
   }
 
-  // ── PARSE BODY ───────────────────────────────────────────────────────────
+  // ── PARSE BODY ────────────────────────────────────────────────────────────
   let body = req.body;
   if (typeof body === 'string') {
     try { body = JSON.parse(body); } catch { body = {}; }
@@ -23,47 +24,58 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Missing systemPrompt or userMessage' });
   }
 
-  // ── CALL OPENAI GPT-4o via Anthropic key is wrong — use Anthropic Claude ─
+  // ── CALL GOOGLE GEMINI 1.5 FLASH (FREE TIER) ─────────────────────────────
+  const GEMINI_URL =
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+
   try {
-    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+    const geminiRes = await fetch(GEMINI_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'claude-opus-4-5',
-        max_tokens: 1500,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userMessage }],
+        system_instruction: {
+          parts: [{ text: systemPrompt }]
+        },
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: userMessage }]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 1500,
+        }
       }),
     });
 
-    const raw = await aiRes.text();
-    console.log('Anthropic status:', aiRes.status);
+    const raw = await geminiRes.text();
+    console.log('Gemini status:', geminiRes.status);
 
-    if (!aiRes.ok) {
-      console.error('Anthropic error:', raw);
-      return res.status(aiRes.status).json({ error: 'Anthropic API error ' + aiRes.status + ': ' + raw });
+    if (!geminiRes.ok) {
+      console.error('Gemini error:', raw);
+      return res.status(geminiRes.status).json({
+        error: `Gemini API error (${geminiRes.status}): ${raw}`
+      });
     }
 
     let data;
     try { data = JSON.parse(raw); } catch {
-      return res.status(500).json({ error: 'Anthropic returned invalid JSON' });
+      return res.status(500).json({ error: 'Gemini returned invalid JSON' });
     }
 
-    const text = data?.content?.[0]?.text || '';
+    // Extract text from Gemini response structure
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
     if (!text) {
-      console.error('Empty content:', JSON.stringify(data));
-      return res.status(500).json({ error: 'AI returned empty content' });
+      console.error('Empty Gemini content:', JSON.stringify(data));
+      return res.status(500).json({ error: 'Gemini returned empty content' });
     }
 
-    console.log('Success — length:', text.length);
+    console.log('Success — response length:', text.length);
     return res.status(200).json({ text });
 
   } catch (err) {
-    console.error('Network error:', err);
+    console.error('Network error calling Gemini:', err);
     return res.status(500).json({ error: 'Network error: ' + err.message });
   }
 }
