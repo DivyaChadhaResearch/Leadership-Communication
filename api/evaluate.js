@@ -1,78 +1,72 @@
 export default async function handler(req, res) {
-  // Handle CORS preflight
+  // ── CORS ────────────────────────────────────────────────────────────────
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  // ── API KEY ──────────────────────────────────────────────────────────────
+  const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    console.error('ANTHROPIC_API_KEY is not set');
-    return res.status(500).json({ error: 'Server configuration error: API key missing' });
+    console.error('OPENAI_API_KEY is not set in environment variables');
+    return res.status(500).json({ error: 'Server config error: OPENAI_API_KEY not set in Vercel environment variables' });
   }
 
+  // ── PARSE BODY ───────────────────────────────────────────────────────────
   let body = req.body;
-
-  // Vercel sometimes passes body as string — parse it
   if (typeof body === 'string') {
     try { body = JSON.parse(body); } catch { body = {}; }
   }
-
   const { systemPrompt, userMessage } = body || {};
-
   if (!systemPrompt || !userMessage) {
-    return res.status(400).json({ error: 'Missing systemPrompt or userMessage in request body' });
+    return res.status(400).json({ error: 'Missing systemPrompt or userMessage' });
   }
 
+  // ── CALL OPENAI GPT-4o ───────────────────────────────────────────────────
   try {
-    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+    const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
+        'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'gpt-4o',
+        temperature: 0.7,
         max_tokens: 1500,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userMessage }],
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userMessage  },
+        ],
       }),
     });
 
-    const responseText = await anthropicRes.text();
-    console.log('Anthropic status:', anthropicRes.status);
+    const raw = await openaiRes.text();
+    console.log('OpenAI status:', openaiRes.status);
 
-    if (!anthropicRes.ok) {
-      console.error('Anthropic error body:', responseText);
-      return res.status(anthropicRes.status).json({ error: `Anthropic API error: ${responseText}` });
+    if (!openaiRes.ok) {
+      console.error('OpenAI error:', raw);
+      return res.status(openaiRes.status).json({ error: `OpenAI API error (${openaiRes.status}): ${raw}` });
     }
 
     let data;
-    try {
-      data = JSON.parse(responseText);
-    } catch {
-      console.error('Failed to parse Anthropic response:', responseText);
-      return res.status(500).json({ error: 'Invalid JSON from Anthropic API' });
+    try { data = JSON.parse(raw); } catch {
+      console.error('Non-JSON from OpenAI:', raw);
+      return res.status(500).json({ error: 'OpenAI returned invalid JSON' });
     }
 
-    const text = data?.content?.[0]?.text || '';
+    const text = data?.choices?.[0]?.message?.content || '';
     if (!text) {
-      console.error('Empty content from Anthropic:', JSON.stringify(data));
-      return res.status(500).json({ error: 'Empty response from AI model' });
+      console.error('Empty content from OpenAI:', JSON.stringify(data));
+      return res.status(500).json({ error: 'OpenAI returned empty content' });
     }
 
+    console.log('Success — response length:', text.length);
     return res.status(200).json({ text });
 
   } catch (err) {
-    console.error('Fetch to Anthropic failed:', err);
-    return res.status(500).json({ error: `Network error calling AI: ${err.message}` });
+    console.error('Network error calling OpenAI:', err);
+    return res.status(500).json({ error: `Network error: ${err.message}` });
   }
 }
