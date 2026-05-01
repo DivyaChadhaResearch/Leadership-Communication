@@ -7,39 +7,58 @@ import {
 } from 'lucide-react';
 
 // ─── Anthropic API helper (via Vercel serverless proxy) ────────────────────
-// Calls /api/evaluate instead of Anthropic directly — avoids CORS + keeps
-// the API key safe in a server-side environment variable.
 async function callClaude(systemPrompt, userMessage) {
-  const response = await fetch('/api/evaluate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ systemPrompt, userMessage }),
-  });
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error(err.error || `Server error: ${response.status}`);
+  let response;
+  try {
+    response = await fetch('/api/evaluate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ systemPrompt, userMessage }),
+    });
+  } catch (netErr) {
+    throw new Error('Network error — cannot reach /api/evaluate: ' + netErr.message);
   }
-  const data = await response.json();
-  return data.text || '';
+  let data;
+  try { data = await response.json(); } catch { throw new Error('Server returned invalid JSON (status ' + response.status + ')'); }
+  if (!response.ok) throw new Error(data?.error || 'Server error ' + response.status);
+  if (!data.text) throw new Error('AI returned empty response — check your ANTHROPIC_API_KEY in Vercel env vars');
+  return data.text;
 }
 
 // ─── Text-to-Speech helper ──────────────────────────────────────────────────
 function speakText(text, onStart, onEnd, voiceRef) {
+  if (!text || !text.trim()) { onEnd && onEnd(); return; }
   window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 0.88;
-  utterance.pitch = 0.92;
-  utterance.volume = 1;
+
+  const doSpeak = (voices) => {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.85;
+    utterance.pitch = 0.9;
+    utterance.volume = 1;
+    utterance.lang = 'en-US';
+    const preferred =
+      voices.find(v => /daniel|alex|james|google uk english|en-gb/i.test(v.name)) ||
+      voices.find(v => v.lang === 'en-US') ||
+      voices.find(v => v.lang.startsWith('en')) ||
+      voices[0];
+    if (preferred) utterance.voice = preferred;
+    if (voiceRef) voiceRef.current = utterance;
+    utterance.onstart = () => { onStart && onStart(); };
+    utterance.onend = () => { onEnd && onEnd(); };
+    utterance.onerror = (e) => { console.warn('TTS error:', e.error); onEnd && onEnd(); };
+    window.speechSynthesis.speak(utterance);
+  };
+
   const voices = window.speechSynthesis.getVoices();
-  const preferred = voices.find(v =>
-    /daniel|alex|james|google uk|en-gb/i.test(v.name)
-  ) || voices.find(v => v.lang.startsWith('en')) || voices[0];
-  if (preferred) utterance.voice = preferred;
-  if (voiceRef) voiceRef.current = utterance;
-  utterance.onstart = onStart;
-  utterance.onend = onEnd;
-  utterance.onerror = onEnd;
-  window.speechSynthesis.speak(utterance);
+  if (voices.length > 0) {
+    doSpeak(voices);
+  } else {
+    // Voices not yet loaded — wait for them
+    window.speechSynthesis.onvoiceschanged = () => {
+      doSpeak(window.speechSynthesis.getVoices());
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+  }
 }
 
 // ─── AI SYSTEM PROMPTS ──────────────────────────────────────────────────────
@@ -110,25 +129,43 @@ DELIVERY INSTRUCTIONS:
 
 // ─── Parse AI response — extract TTS text ──────────────────────────────────
 function parseAIResponse(text) {
-  const rewriteMatch =
-    text.match(/EXECUTIVE REWRITE:\s*([\s\S]*?)(?=\nCOACHING TIPS:|$)/i) ||
-    text.match(/BOARD-READY NARRATIVE:\s*([\s\S]*?)(?=\nIDEAL OPENING LINE:|$)/i) ||
-    text.match(/IDEAL OPENING LINE:\s*([\s\S]*?)(?=\nDELIVERY INSTRUCTIONS:|$)/i);
-  const ttsText = rewriteMatch ? rewriteMatch[1].trim() : text.slice(0, 400);
-  return { ttsText };
+  if (!text) return { ttsText: '' };
+  // Try each rewrite section in priority order
+  const patterns = [
+    /EXECUTIVE REWRITE:\s*([\s\S]*?)(?=\nCOACHING TIPS:|\nIMPROVEMENTS|$)/i,
+    /BOARD-READY NARRATIVE:\s*([\s\S]*?)(?=\nIDEAL OPENING LINE:|$)/i,
+    /IDEAL OPENING LINE:\s*([\s\S]*?)(?=\nDELIVERY INSTRUCTIONS:|$)/i,
+  ];
+  for (const pat of patterns) {
+    const m = text.match(pat);
+    if (m && m[1].trim()) return { ttsText: m[1].trim() };
+  }
+  // Fallback: strip section headers and use first 500 chars of plain content
+  const stripped = text.replace(/^[A-Z ]+:\s*$/gm, '').replace(/•\s*/g, '').trim();
+  return { ttsText: stripped.slice(0, 500) };
 }
 
 // ─── Extract dimension scores from AI text ─────────────────────────────────
 function extractScores(text) {
+  if (!text) return {};
   const scores = {};
+  const SKIP = ['executive communication score', 'presentation clarity score'];
   text.split('\n').forEach(line => {
-    const m = line.match(/^([A-Za-z ]+):\s*(\d+(?:\.\d+)?)\/10/);
-    if (m && !m[1].toLowerCase().includes('score')) {
-      scores[m[1].trim()] = parseFloat(m[2]);
+    // Match "Label: 8/10" or "Label: 8.5/10"
+    const m = line.match(/^\s*([A-Za-z][A-Za-z ]{1,30}):\s*(\d+(?:\.\d+)?)\/10/);
+    if (m) {
+      const label = m[1].trim();
+      const labelLower = label.toLowerCase();
+      // Overall score lines — store as Overall
+      if (SKIP.some(s => labelLower.includes(s.split(' ')[0]) && labelLower.includes('score'))) {
+        scores['Overall'] = parseFloat(m[2]);
+      } else if (!labelLower.includes('score')) {
+        scores[label] = parseFloat(m[2]);
+      }
     }
-    // single overall score
-    const single = line.match(/SCORE:\s*(\d+(?:\.\d+)?)\/10/i);
-    if (single) scores['Overall'] = parseFloat(single[1]);
+    // "EXECUTIVE COMMUNICATION SCORE: 8/10" format
+    const overall = line.match(/(?:SCORE|OVERALL)[^:]*:\s*(\d+(?:\.\d+)?)\/10/i);
+    if (overall && !scores['Overall']) scores['Overall'] = parseFloat(overall[1]);
   });
   return scores;
 }
@@ -451,19 +488,23 @@ const App = () => {
     if (!spokenText.trim()) return;
     setStatus('processing');
     setError('');
+    setAiResult(null);
     try {
       const userMsg = type === 'challenge'
-        ? `Scenario: "${selectedChallenge?.title}"\nGoal: "${selectedChallenge?.goal}"\nLeader's response: "${spokenText}"`
-        : `Leader's statement: "${spokenText}"`;
+        ? 'Scenario: "' + (selectedChallenge?.title || '') + '"\nGoal: "' + (selectedChallenge?.goal || '') + '"\nLeader response: "' + spokenText + '"'
+        : 'Leader statement to evaluate: "' + spokenText + '"'
+      console.log('Sending to AI — type:', type, 'length:', spokenText.length);
       const raw = await callClaude(SYSTEM_PROMPTS[type], userMsg);
+      console.log('AI raw response (first 200):', raw.slice(0, 200));
       const { ttsText } = parseAIResponse(raw);
       const scores = extractScores(raw);
+      console.log('Parsed ttsText length:', ttsText.length, 'scores:', scores);
       setAiResult({ full: raw, ttsText, scores });
       setStatus('ready');
       setTasksDone(p => Math.min(p + 1, totalTasks));
     } catch (err) {
-      console.error(err);
-      setError('AI evaluation failed. Please check your connection and try again.');
+      console.error('runEvaluation error:', err);
+      setError(err.message || 'Unknown error during AI evaluation');
       setStatus('idle');
     }
   }, [selectedChallenge]);
